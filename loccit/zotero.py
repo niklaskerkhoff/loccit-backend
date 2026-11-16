@@ -13,8 +13,8 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 
-from loccit.bibfile import parse_bib
-from loccit.normalize import normalize_doi, normalize_title
+from loccit.bibfile import BibEntry, parse_bib
+from loccit.normalize import normalize_doi, normalize_title, normalize_url
 
 DEFAULT_BASE_URL = "http://localhost:23119/api/users/0"
 
@@ -69,8 +69,9 @@ class ZoteroClient:
         return response
 
     def fetch_items(self) -> list[dict]:
-        """All items of the user library, each with its own BibTeX export."""
-        response = self._get("/items", include="data,bibtex")
+        """All items of the user library, each with its own BibTeX and
+        BibLaTeX export."""
+        response = self._get("/items", include="data,bibtex,biblatex")
         if response.status_code != 200:
             raise ZoteroError(f"GET /items returned HTTP {response.status_code}")
         return response.json()
@@ -111,18 +112,41 @@ class ZoteroItem:
     title: str
     authors: list[str]
     year: str | None
+    date: str = ""
+    date_added: str = ""
+    doi: str | None = None
+    url: str | None = None
+    # Normalised values an entry of a .bib can be compared with.
     dois: set[str] = field(default_factory=set)
+    urls: set[str] = field(default_factory=set)
     titles: set[str] = field(default_factory=set)
+    # Entry types of the item in Zotero's BibTeX and BibLaTeX export.
+    entry_types: set[str] = field(default_factory=set)
     # cite key -> where it comes from (export, citationKey field, Extra line)
     cite_keys: dict[str, str] = field(default_factory=dict)
-    # PDF attachments, the one added first comes first.
+    # The attachment Zotero itself treats as the item's main one.
+    main_attachment_key: str | None = None
+    # PDF attachments: the main one first, then in the order they were added.
     pdfs: list[Attachment] = field(default_factory=list)
+
+    def is_duplicate_of(self, other: "ZoteroItem") -> bool:
+        """Whether the two items cannot be told apart as publications: the
+        same DOI, or without any DOI the same title, year, type and URL."""
+        if self.dois or other.dois:
+            return bool(self.dois & other.dois)
+        return (
+            bool(self.titles & other.titles)
+            and self.year == other.year
+            and self.item_type == other.item_type
+            and self.urls == other.urls
+        )
 
 
 @dataclass
 class LibraryIndex:
     items: dict[str, ZoteroItem] = field(default_factory=dict)
     by_doi: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    by_url: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     by_title: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
     by_cite_key: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
 
@@ -152,12 +176,16 @@ class LibraryIndex:
             parent = index.items.get(attachment.parent_key)
             if parent:
                 parent.pdfs.append(attachment)
+        for item in index.items.values():
+            item.pdfs.sort(key=lambda a: a.key != item.main_attachment_key)
         return index
 
     def _add(self, item: ZoteroItem) -> None:
         self.items[item.key] = item
         for doi in item.dois:
             self.by_doi[doi].append(item.key)
+        for url in item.urls:
+            self.by_url[url].append(item.key)
         for title in item.titles:
             self.by_title[title].append(item.key)
         for cite_key in item.cite_keys:
@@ -173,7 +201,8 @@ def _parse_item(raw: dict) -> ZoteroItem:
     extra = data.get("extra") or ""
     # The item as Zotero's BibTeX translator exports it, i.e. the same shape
     # the entries of an Overleaf-imported .bib have.
-    exported = next(iter(parse_bib(raw.get("bibtex") or "").entries.values()), None)
+    exported = _first_entry(raw.get("bibtex"))
+    biblatex = _first_entry(raw.get("biblatex"))
 
     creators = data.get("creators") or []
     authors = [c for c in creators if c.get("creatorType") == "author"] or creators
@@ -187,12 +216,21 @@ def _parse_item(raw: dict) -> ZoteroItem:
         title=data.get("title") or "",
         authors=[c.get("lastName") or c.get("name") or "" for c in authors],
         year=year,
+        date=data.get("date") or "",
+        date_added=data.get("dateAdded") or "",
+        doi=data.get("DOI") or None,
+        url=data.get("url") or None,
+        entry_types={entry.entry_type for entry in (exported, biblatex) if entry},
+        main_attachment_key=_main_attachment_key(raw),
     )
 
     extra_doi = _EXTRA_DOI.search(extra)
     for doi in (data.get("DOI"), exported.doi if exported else None, extra_doi and extra_doi[1]):
         if normalized := normalize_doi(doi):
             item.dois.add(normalized)
+    for url in (data.get("url"), exported.fields.get("url") if exported else None):
+        if normalized := normalize_url(url):
+            item.urls.add(normalized)
     for title in (data.get("title"), exported.title if exported else None):
         if normalized := normalize_title(title):
             item.titles.add(normalized)
@@ -204,3 +242,13 @@ def _parse_item(raw: dict) -> ZoteroItem:
     if extra_key := _EXTRA_CITATION_KEY.search(extra):
         item.cite_keys.setdefault(extra_key[1], KEY_FROM_EXTRA)
     return item
+
+
+def _first_entry(exported: str | None) -> BibEntry | None:
+    return next(iter(parse_bib(exported or "").entries.values()), None)
+
+
+def _main_attachment_key(raw: dict) -> str | None:
+    """Zotero links its "best attachment" of an item as `links.attachment`."""
+    href = (raw.get("links") or {}).get("attachment", {}).get("href")
+    return href.rstrip("/").rsplit("/", 1)[-1] if href else None

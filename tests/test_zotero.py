@@ -76,6 +76,39 @@ def test_pdf_attachments_are_ordered_by_date_added():
     assert [pdf.key for pdf in index.items["ITEM0001"].pdfs] == ["PDFFIRST", "PDFLATER"]
 
 
+def test_zoteros_main_attachment_comes_first():
+    index = LibraryIndex.from_api_items(
+        [
+            raw_item("ITEM0001", "One", cite_key="one_2025", main_attachment="PDFMAIN1"),
+            raw_pdf("PDFFIRST", "ITEM0001", date_added="2024-08-12T00:00:08Z"),
+            raw_pdf("PDFMAIN1", "ITEM0001", date_added="2025-05-01T10:00:00Z"),
+        ]
+    )
+    item = index.items["ITEM0001"]
+    assert item.main_attachment_key == "PDFMAIN1"
+    assert [pdf.key for pdf in item.pdfs] == ["PDFMAIN1", "PDFFIRST"]
+
+
+def test_item_carries_what_a_bib_entry_is_compared_with():
+    index = LibraryIndex.from_api_items(
+        [
+            raw_item(
+                "ITEM0001",
+                "One",
+                cite_key="one_2025",
+                item_type="preprint",
+                doi="10.1000/ABC",
+                url="http://arxiv.org/abs/1",
+            )
+        ]
+    )
+    item = index.items["ITEM0001"]
+    assert item.entry_types == {"misc"}
+    assert item.dois == {"10.1000/abc"}
+    assert item.urls == {"http://arxiv.org/abs/1"}
+    assert index.by_url["http://arxiv.org/abs/1"] == ["ITEM0001"]
+
+
 def test_trashed_items_are_skipped():
     trashed = raw_item("ITEM0001", "One", cite_key="one_2025")
     trashed["data"]["deleted"] = 1
@@ -92,7 +125,7 @@ def test_library_is_read_with_one_get_request():
     library = client_answering(handler).load_library()
     assert list(library.items) == ["ITEM0001"]
     assert [(r.method, r.url.path) for r in requests] == [("GET", "/api/users/0/items")]
-    assert requests[0].url.params["include"] == "data,bibtex"
+    assert requests[0].url.params["include"] == "data,bibtex,biblatex"
 
 
 def test_403_means_local_api_is_disabled():

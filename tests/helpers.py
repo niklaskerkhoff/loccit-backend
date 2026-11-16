@@ -47,20 +47,26 @@ def make_pdf(path: Path, pages: list[list[list[Run]]]) -> Path:
     return path
 
 
+ENTRY_TYPES = {"journalArticle": "article", "conferencePaper": "inproceedings", "preprint": "misc"}
+
+
 def raw_item(
     key: str,
     title: str,
     *,
     cite_key: str,
     doi: str | None = None,
+    url: str | None = None,
     year: str | None = "2025",
     item_type: str = "journalArticle",
     authors: tuple[str, ...] = ("Heltweg",),
     extra: str = "",
     citation_key_field: str | None = None,
+    date_added: str = "2024-01-01T00:00:00Z",
+    main_attachment: str | None = None,
 ) -> dict:
-    """An item as the local Zotero API returns it for `include=data,bibtex`."""
-    bibtex = f"\n@article{{{cite_key},\n\ttitle = {{{title}}},\n"
+    """An item as the local Zotero API returns it for `include=data,bibtex,biblatex`."""
+    exported = f"\n@{ENTRY_TYPES[item_type]}{{{cite_key},\n\ttitle = {{{title}}},\n"
     data = {
         "key": key,
         "itemType": item_type,
@@ -70,16 +76,26 @@ def raw_item(
         ],
         "date": year or "",
         "extra": extra,
-        "dateAdded": "2024-01-01T00:00:00Z",
+        "dateAdded": date_added,
     }
+    links = {}
     if doi:
         data["DOI"] = doi
-        bibtex += f"\tdoi = {{{doi}}},\n"
+        exported += f"\tdoi = {{{doi}}},\n"
+    if url:
+        data["url"] = url
+        exported += f"\turl = {{{url}}},\n"
     if year:
-        bibtex += f"\tyear = {{{year}}},\n"
+        exported += f"\tyear = {{{year}}},\n"
     if citation_key_field:
         data["citationKey"] = citation_key_field
-    return {"key": key, "data": data, "bibtex": bibtex + "}\n"}
+    if main_attachment:
+        links["attachment"] = {
+            "href": f"http://localhost:23119/api/users/1/items/{main_attachment}",
+            "attachmentType": "application/pdf",
+        }
+    exported += "}\n"
+    return {"key": key, "links": links, "data": data, "bibtex": exported, "biblatex": exported}
 
 
 def raw_pdf(

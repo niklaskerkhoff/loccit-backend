@@ -20,6 +20,12 @@ def normalize_doi(doi: str | None) -> str | None:
     return doi or None
 
 
+def normalize_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    return _LATEX_ESCAPE.sub(r"\1", url).strip() or None
+
+
 def normalize_title(title: str | None) -> str:
     """Lower-case, without braces, LaTeX commands, punctuation and repeated spaces."""
     if not title:
