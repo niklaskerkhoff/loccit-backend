@@ -80,12 +80,15 @@ def test_resolve_report(zotero, thesis, tmp_path, capsys):
     assert "S. 1: heltweg_study_2025, brown_no_2020" in out
     assert "Quellen ohne PDF: 2 von 3" in out
     assert "brown_no_2020: Eintrag ITEM0002 hat keinen PDF-Anhang – No PDF here" in out
+    assert "Auswahl nötig: 0 von 3" in out
+    assert "Dubletten in Zotero: 0" in out
+    assert "Weg A ordnet 2 von 3 Schlüsseln zu." in out
     assert (
         "missing_key_2019: kein Zotero-Eintrag passt – Never added to Zotero "
         "(Heltweg et al., 2019)" in out
     )
-    assert "Weg B allein ordnet 2 von 3 Schlüsseln eindeutig zu." in out
-    assert "Davon bestätigt Weg A denselben Eintrag: 2" in out
+    assert "Weg B allein ordnet 2 von 3 Schlüsseln zu." in out
+    assert "Von den 2 zugeordneten bestätigt Weg A denselben Eintrag: 2" in out
 
 
 def test_resolve_without_bib(zotero, thesis, capsys):

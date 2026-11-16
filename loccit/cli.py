@@ -13,6 +13,7 @@ from loccit.zotero import (
     ZoteroApiDisabled,
     ZoteroClient,
     ZoteroError,
+    ZoteroItem,
     ZoteroNotRunning,
 )
 
@@ -29,8 +30,16 @@ _WAY_A_REASONS = {
     "not_in_bib": "nicht in .bib",
     "duplicate_in_bib": "doppelt in .bib",
     "no_hit": "kein Treffer",
+    "contradicts_bib": "Treffer widersprechen der .bib",
 }
-_WAY_A_MATCHES = {"doi": "DOI", "title+year": "Titel+Jahr"}
+_WAY_LABELS = {
+    "doi": "DOI",
+    "url": "URL",
+    "title+year": "Titel+Jahr",
+    "suffix": "Grundschlüssel",
+    KEY_FROM_EXPORT: "",
+}
+_FIELD_LABELS = {"doi": "DOI", "url": "URL", "type": "Eintragstyp"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -53,24 +62,19 @@ def run_resolve(pdf: Path, bib_path: Path | None) -> int:
 
     scan = scan_citations(pdf)
     if not scan.groups:
-        print(_no_citation_links(scan), file=sys.stderr)
+        print(no_citation_links(scan), file=sys.stderr)
         return 1
 
     client = ZoteroClient()
     try:
         library = client.load_library()
-        bib = load_bib(bib_path) if bib_path else None
-        overrides = res.load_overrides(paths.overrides_file())
-        resolutions = [
-            res.resolve(
-                key,
-                bib=bib,
-                library=library,
-                overrides=overrides,
-                locate_file=client.attachment_file_url,
-            )
-            for key in scan.keys
-        ]
+        resolver = res.Resolver(
+            library,
+            client.attachment_file_url,
+            bib=load_bib(bib_path) if bib_path else None,
+            overrides=res.load_overrides(paths.overrides_file()),
+        )
+        resolutions = [resolver.resolve(key) for key in scan.keys]
     except ZoteroNotRunning:
         print(ZOTERO_NOT_RUNNING, file=sys.stderr)
         return 2
@@ -83,11 +87,11 @@ def run_resolve(pdf: Path, bib_path: Path | None) -> int:
     finally:
         client.close()
 
-    print(_report(scan, library, resolutions, has_bib=bib is not None))
+    print(_report(scan, library, resolutions, has_bib=resolver.bib is not None))
     return 0
 
 
-def _no_citation_links(scan: CitationScan) -> str:
+def no_citation_links(scan: CitationScan) -> str:
     message = (
         "Das PDF enthält keine Zitat-Links (Link-Ziele der Form cite.<key> oder "
         "cite.<refsection>@<key>). Ist es mit hyperref gebaut?"
@@ -116,7 +120,7 @@ def _report(
         _table(
             ["Schlüssel", "Weg A (.bib)", "Weg B (Schlüssel)", "A=B", "PDF oder Grund"],
             [
-                [r.cite_key, _way_a(r.way_a), _way_b(r.way_b), _agreement(r), _outcome(r)]
+                [r.cite_key, _way(r.way_a), _way(r.way_b), _agreement(r), _outcome(r)]
                 for r in resolutions
             ],
         ),
@@ -133,55 +137,86 @@ def _report(
         )
     out.append("")
 
-    missing = [r for r in resolutions if r.status != res.OK]
+    missing = [r for r in resolutions if r.status in (res.NO_ENTRY, res.NO_PDF, res.FILE_MISSING)]
     out.append(f"Quellen ohne PDF: {len(missing)} von {len(resolutions)}")
     out += [f"  {r.cite_key}: {_reason(r)}{_metadata(r)}" for r in missing]
     out.append("")
 
+    choices = [r for r in resolutions if r.status == res.CHOICE_NEEDED]
+    out.append(f"Auswahl nötig: {len(choices)} von {len(resolutions)}")
+    for r in choices:
+        out.append(f"  {r.cite_key}:{_metadata(r)}")
+        out += [f"    {_candidate(library.items[group[0]], group)}" for group in r.candidates]
+    out.append("")
+
+    duplicates = [r for r in resolutions if r.duplicates]
+    out.append(f"Dubletten in Zotero: {len(duplicates)}")
+    out += [f"  {r.cite_key}: {_duplicate_note(r)}" for r in duplicates]
+    out.append("")
+
+    several_pdfs = [r for r in resolutions if r.pdf and len(r.pdfs) > 1]
+    if several_pdfs:
+        out.append(f"Einträge mit mehreren PDFs: {len(several_pdfs)}")
+        out += [f"  {r.cite_key}: {_pdf_note(r)}" for r in several_pdfs]
+        out.append("")
+
     warnings = [r for r in resolutions if r.conflict]
     if warnings:
         out.append(f"Widerspruch zwischen Weg A und Weg B: {len(warnings)}")
-        out += [f"  {r.cite_key}: A {_way_a(r.way_a)}, B {_way_b(r.way_b)}" for r in warnings]
+        out += [f"  {r.cite_key}: A {_way(r.way_a)}, B {_way(r.way_b)}" for r in warnings]
         out.append("")
 
-    out += _way_b_summary(resolutions, has_bib)
+    out += _way_summaries(resolutions, has_bib)
     return "\n".join(out)
 
 
-def _way_b_summary(resolutions: list[res.Resolution], has_bib: bool) -> list[str]:
-    matched = [r for r in resolutions if r.way_b.status == res.MATCH]
-    out = [f"Weg B allein ordnet {len(matched)} von {len(resolutions)} Schlüsseln eindeutig zu."]
+def _way_summaries(resolutions: list[res.Resolution], has_bib: bool) -> list[str]:
+    total = len(resolutions)
+    out = []
+    if has_bib:
+        a_matched = sum(r.way_a.status == res.MATCH for r in resolutions)
+        out.append(f"Weg A ordnet {a_matched} von {total} Schlüsseln zu.")
+    b_matched = [r for r in resolutions if r.way_b.status == res.MATCH]
+    b_choices = [r for r in resolutions if r.way_b.status == res.CHOICE]
+    b_none = [r for r in resolutions if r.way_b.status == res.NONE]
+    out.append(f"Weg B allein ordnet {len(b_matched)} von {total} Schlüsseln zu.")
+    out.append(f"  Auswahl nötig: {len(b_choices)}")
+    out += [f"    {r.cite_key}: {', '.join(r.way_b.candidates)}" for r in b_choices]
+    out.append(f"  Kein Treffer: {len(b_none)}")
+    out += [f"    {r.cite_key}" for r in b_none]
     if not has_bib:
         out.append("  Ohne .bib lässt sich das nicht gegen Weg A prüfen.")
         return out
-    agree = [r for r in matched if r.ways_agree]
-    differ = [r for r in matched if r.ways_agree is False]
-    unchecked = [r for r in matched if r.ways_agree is None]
-    out.append(f"  Davon bestätigt Weg A denselben Eintrag: {len(agree)}")
+    agree = sum(r.ways_agree is True for r in b_matched)
+    differ = [r for r in b_matched if r.ways_agree is False]
+    unchecked = [r for r in b_matched if r.ways_agree is None]
+    out.append(f"  Von den {len(b_matched)} zugeordneten bestätigt Weg A denselben Eintrag: {agree}")
     out.append(f"  Weg A findet einen anderen Eintrag: {len(differ)}")
+    out += [f"    {r.cite_key}: A {_way(r.way_a)}, B {_way(r.way_b)}" for r in differ]
     out.append(f"  Weg A findet nichts Eindeutiges (nur Weg B): {len(unchecked)}")
-    out += [f"    {r.cite_key}: A {_way_a(r.way_a)}" for r in unchecked]
-    lost = [r for r in resolutions if r.way_b.status != res.MATCH and r.way_a.status == res.MATCH]
-    out.append(f"  Nur Weg A findet den Eintrag (ohne .bib verloren): {len(lost)}")
-    out += [f"    {r.cite_key}: B {_way_b(r.way_b)}" for r in lost]
+    out += [f"    {r.cite_key}: A {_way(r.way_a)}" for r in unchecked]
     return out
 
 
-def _way_a(way: res.WayResult) -> str:
+def _way(way: res.WayResult) -> str:
+    label = _WAY_LABELS.get(way.how, way.how)
     if way.status == res.MATCH:
-        return f"{way.item_key} ({_WAY_A_MATCHES[way.how]})"
-    if way.status == res.AMBIGUOUS:
-        return f"mehrdeutig über {_WAY_A_MATCHES[way.how]}: {', '.join(way.candidates)}"
-    return f"– ({_WAY_A_REASONS[way.how]})"
+        notes = [label] if label else []
+        if len(way.groups[0]) > 1:
+            notes.append(f"Dublette ×{len(way.groups[0])}")
+        return f"{way.item_key} ({', '.join(notes)})" if notes else way.item_key
+    if way.status == res.CHOICE:
+        via = f" über {label}" if label else ""
+        return f"Auswahl nötig{via}: {', '.join(way.candidates)}"
+    if way.how == "unknown_key":
+        return "–"
+    return f"– ({_WAY_A_REASONS[way.how]}{_rejected(way)})"
 
 
-def _way_b(way: res.WayResult) -> str:
-    if way.status == res.MATCH:
-        origin = "" if way.how == KEY_FROM_EXPORT else f" ({way.how})"
-        return f"{way.item_key}{origin}"
-    if way.status == res.AMBIGUOUS:
-        return f"mehrdeutig: {', '.join(way.candidates)}"
-    return "–"
+def _rejected(way: res.WayResult) -> str:
+    if way.status != res.NONE or not way.rejected:
+        return ""
+    return ": " + ", ".join(f"{key} im {_FIELD_LABELS[name]}" for key, name in way.rejected)
 
 
 def _agreement(resolution: res.Resolution) -> str:
@@ -192,13 +227,13 @@ def _reason(resolution: res.Resolution) -> str:
     if resolution.status == res.NO_PDF:
         return f"Eintrag {resolution.item_key} hat keinen PDF-Anhang"
     if resolution.status == res.FILE_MISSING:
-        where = f": {resolution.pdf_path}" if resolution.pdf_path else ""
-        return f"Datei des Anhangs {resolution.attachment_key} fehlt auf der Platte{where}"
+        pdf = resolution.pdf
+        where = f": {pdf.path}" if pdf.path else ""
+        return f"Datei des Anhangs {pdf.attachment_key} fehlt auf der Platte{where}"
+    if resolution.status == res.CHOICE_NEEDED:
+        return f"Auswahl nötig ({', '.join(group[0] for group in resolution.candidates)})"
     if resolution.detail == "unknown_override":
         return f"overrides.toml verweist auf unbekannten Eintrag {resolution.override_item_key}"
-    if resolution.detail == "ambiguous":
-        candidates = dict.fromkeys(resolution.way_a.candidates + resolution.way_b.candidates)
-        return f"mehrere Zotero-Einträge passen ({', '.join(candidates)})"
     return "kein Zotero-Eintrag passt"
 
 
@@ -208,10 +243,38 @@ def _outcome(resolution: res.Resolution) -> str:
     notes = []
     if resolution.source == "override":
         notes.append("manuell zugeordnet")
-    if resolution.other_pdf_count:
-        notes.append(f"+{resolution.other_pdf_count} weitere PDFs")
+    if resolution.source == "choice":
+        notes.append("gewählt")
+    if resolution.duplicates:
+        notes.append(f"Dublette ×{len(resolution.duplicates)}")
+    if len(resolution.pdfs) > 1:
+        notes.append(f"{len(resolution.pdfs)} PDFs")
     suffix = f"  [{', '.join(notes)}]" if notes else ""
     return f"{resolution.pdf_path}{suffix}"
+
+
+def _duplicate_note(resolution: res.Resolution) -> str:
+    others = ", ".join(resolution.duplicates[1:])
+    return (
+        f"Dublette: {len(resolution.duplicates)} Einträge, "
+        f"gewählt {resolution.item_key} (übrige: {others})"
+    )
+
+
+def _pdf_note(resolution: res.Resolution) -> str:
+    listed = ", ".join(
+        f"{pdf.attachment_key}{'' if pdf.exists else ' (Datei fehlt)'}" for pdf in resolution.pdfs
+    )
+    return f"{len(resolution.pdfs)} PDFs, verwendet {resolution.pdf.attachment_key} ({listed})"
+
+
+def _candidate(item: ZoteroItem, group: tuple[str, ...]) -> str:
+    parts = [item.key, item.item_type, item.date or "ohne Datum"]
+    parts.append(f"DOI {item.doi}" if item.doi else item.url or "ohne DOI und URL")
+    parts.append(f"{len(item.pdfs)} PDF" if item.pdfs else "kein PDF")
+    if len(group) > 1:
+        parts.append(f"Dublette ×{len(group)}")
+    return " | ".join(parts)
 
 
 def _metadata(resolution: res.Resolution) -> str:
