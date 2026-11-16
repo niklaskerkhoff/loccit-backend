@@ -1,1 +1,11 @@
 .idea
+.DS_Store
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# built frontend copied in for serving
+loccit/static/
