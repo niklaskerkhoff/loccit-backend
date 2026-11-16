@@ -338,5 +338,5 @@ def _fill_metadata(
         resolution.year = item.year
     elif entry:
         resolution.title = strip_braces(entry.title or "") or None
-        resolution.authors = tuple(entry.authors)
+        resolution.authors = tuple(entry.last_names)
         resolution.year = entry.year

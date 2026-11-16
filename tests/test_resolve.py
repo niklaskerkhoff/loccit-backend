@@ -520,7 +520,7 @@ def test_reason_1_no_item_matches(resolver):
     assert result.item_key is None
     # What is known comes from the .bib, so the PDF can be added to Zotero.
     assert (result.title, result.year) == ("Not in Zotero", "2025")
-    assert result.authors == ("Heltweg, Philip", "Riehle, Dirk")
+    assert result.authors == ("Heltweg", "Riehle")
 
 
 def test_reason_2_item_without_pdf(resolver):

@@ -45,12 +45,26 @@ class BibEntry:
         names = self.fields.get("author") or self.fields.get("editor") or ""
         return [strip_braces(n).strip() for n in _NAME_SEPARATOR.split(names) if n.strip()]
 
+    @property
+    def last_names(self) -> list[str]:
+        """Family names of the authors; a braced name is kept whole."""
+        names = self.fields.get("author") or self.fields.get("editor") or ""
+        return [_last_name(n.strip()) for n in _NAME_SEPARATOR.split(names) if n.strip()]
+
 
 @dataclass
 class BibFile:
     entries: dict[str, BibEntry] = field(default_factory=dict)
     # Keys defined more than once; such a key identifies nothing.
     duplicate_keys: set[str] = field(default_factory=set)
+
+
+def _last_name(name: str) -> str:
+    if name.startswith("{") and name.endswith("}"):
+        return strip_braces(name)
+    if "," in name:
+        return strip_braces(name.split(",")[0]).strip()
+    return strip_braces(name).split()[-1]
 
 
 def strip_braces(value: str) -> str:
