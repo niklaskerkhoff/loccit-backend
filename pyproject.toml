@@ -17,3 +17,8 @@ include = ["loccit*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Raised inside PyMuPDF's SWIG bindings and Starlette's test client.
+    "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient`",
+]
