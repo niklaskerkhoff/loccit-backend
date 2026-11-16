@@ -1,12 +1,24 @@
-"""Command line entry point: `python -m loccit <command>`."""
+"""Command line entry point.
+
+`python -m loccit [thesis.pdf --bib refs.bib]` starts the server,
+`python -m loccit resolve thesis.pdf --bib refs.bib` prints the mapping.
+"""
 
 import argparse
+import socket
 import sys
+import threading
+import webbrowser
 from pathlib import Path
 
+import uvicorn
+
 from loccit import paths, resolve as res
+from loccit.api import create_app
 from loccit.bibfile import load_bib
 from loccit.citations import CitationScan, scan_citations
+from loccit.settings import load_settings, save_settings
+from loccit.workspace import InvalidPdf, Workspace
 from loccit.zotero import (
     KEY_FROM_EXPORT,
     LibraryIndex,
@@ -42,16 +54,112 @@ _WAY_LABELS = {
 _FIELD_LABELS = {"doi": "DOI", "url": "URL", "type": "Eintragstyp"}
 
 
+DEFAULT_PORT = 8765
+DEV_SERVER_URL = "http://localhost:5173/"
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m loccit")
-    commands = parser.add_subparsers(dest="command", required=True)
-    resolve = commands.add_parser(
-        "resolve", help="show how every citation of a thesis PDF maps to a Zotero PDF"
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["resolve"]:
+        parser = argparse.ArgumentParser(
+            prog="python -m loccit resolve",
+            description="Show how every citation of a thesis PDF maps to a Zotero PDF.",
+        )
+        parser.add_argument("pdf", type=Path, help="PDF of the thesis")
+        parser.add_argument("--bib", type=Path, help=".bib file of the thesis")
+        args = parser.parse_args(argv[1:])
+        return run_resolve(args.pdf, args.bib)
+
+    parser = argparse.ArgumentParser(
+        prog="python -m loccit",
+        description="Start loccit and open it in the browser.",
+        epilog="Other command: python -m loccit resolve thesis.pdf [--bib refs.bib]",
     )
-    resolve.add_argument("pdf", type=Path, help="PDF of the thesis")
-    resolve.add_argument("--bib", type=Path, help=".bib file of the thesis")
+    parser.add_argument("pdf", nargs="?", type=Path, help="PDF of the thesis to open")
+    parser.add_argument("--bib", type=Path, help=".bib file of the thesis")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--frontend",
+        type=Path,
+        metavar="DIST",
+        help="folder of the built web frontend; remembered in ~/.loccit/settings.toml",
+    )
+    parser.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
     args = parser.parse_args(argv)
-    return run_resolve(args.pdf, args.bib)
+    if args.bib and not args.pdf:
+        parser.error("--bib needs the PDF of the thesis")
+    return run_server(args)
+
+
+def run_server(args: argparse.Namespace) -> int:
+    root = paths.data_dir()
+    settings = load_settings(paths.settings_file(root))
+    if args.frontend:
+        dist = args.frontend.expanduser().resolve()
+        if not (dist / "index.html").is_file():
+            print(
+                f"Kein gebautes Frontend in {dist} (index.html fehlt). "
+                "Erst im Frontend-Repo `npm run build` ausführen.",
+                file=sys.stderr,
+            )
+            return 2
+        settings.frontend_dist = dist
+        save_settings(paths.settings_file(root), settings)
+
+    workspace = Workspace(root)
+    fragment = ""
+    if args.pdf:
+        for path in (args.pdf, args.bib):
+            if path and not path.is_file():
+                print(f"Datei nicht gefunden: {path}", file=sys.stderr)
+                return 2
+        try:
+            document = workspace.import_document(
+                args.pdf.name, args.pdf.read_bytes(), args.bib.read_bytes() if args.bib else None
+            )
+        except InvalidPdf:
+            print(f"Keine lesbare PDF-Datei: {args.pdf}", file=sys.stderr)
+            return 2
+        fragment = f"#/doc/{document.id}"
+
+    if _port_in_use(args.port):
+        print(
+            f"Port {args.port} ist belegt. Läuft loccit schon? Sonst mit --port einen anderen wählen.",
+            file=sys.stderr,
+        )
+        return 2
+
+    frontend = settings.frontend_dist
+    backend_url = f"http://127.0.0.1:{args.port}/"
+    if frontend and (frontend / "index.html").is_file():
+        print(f"loccit läuft auf {backend_url}{fragment} (Beenden mit Strg+C)")
+        if not args.no_browser:
+            threading.Timer(0.7, webbrowser.open, [backend_url + fragment]).start()
+    else:
+        if frontend:
+            print(f"Hinterlegtes Frontend nicht gefunden: {frontend}")
+        frontend = None
+        print(
+            f"loccit-Backend läuft auf {backend_url} (Beenden mit Strg+C).\n"
+            "Es ist kein gebautes Frontend hinterlegt. Zwei Möglichkeiten, im Frontend-Repo:\n"
+            f"  Entwicklung: `npm run dev` starten und {DEV_SERVER_URL}{fragment} öffnen\n"
+            "  Dauerhaft:   `npm run build`, dann einmalig\n"
+            "               python -m loccit --frontend /pfad/zu/loccit-web-frontend/dist"
+        )
+    uvicorn.run(
+        create_app(workspace, frontend), host="127.0.0.1", port=args.port, log_level="warning"
+    )
+    return 0
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1", port))
+        except OSError:
+            return True
+    return False
 
 
 def run_resolve(pdf: Path, bib_path: Path | None) -> int:
@@ -280,8 +388,7 @@ def _candidate(item: ZoteroItem, group: tuple[str, ...]) -> str:
 def _metadata(resolution: res.Resolution) -> str:
     if not resolution.title:
         return ""
-    # .bib names are "Last, First"; Zotero names are last names already.
-    authors = resolution.authors[0].split(",")[0] if resolution.authors else "?"
+    authors = resolution.authors[0] if resolution.authors else "?"
     if len(resolution.authors) > 1:
         authors += " et al."
     return f" – {resolution.title} ({authors}, {resolution.year or 'o. J.'})"
