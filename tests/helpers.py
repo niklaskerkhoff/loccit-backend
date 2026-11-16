@@ -120,3 +120,32 @@ def raw_pdf(
     if deleted:
         data["deleted"] = 1
     return {"key": key, "data": data, "bibtex": "\n\n"}
+
+
+class FakeZotero:
+    """Stands in for ZoteroClient. Every attachment is reported as a file
+    `<attachment key>.pdf` in `folder`; whether it exists is up to the test."""
+
+    def __init__(self, folder: Path, raw_items: list[dict] | None = None):
+        self.folder = folder
+        self.raw_items = raw_items or []
+        self.error: Exception | None = None
+        self.library_loads = 0
+
+    def load_library(self):
+        from loccit.zotero import LibraryIndex
+
+        if self.error:
+            raise self.error
+        self.library_loads += 1
+        return LibraryIndex.from_api_items(self.raw_items)
+
+    def attachment_file_url(self, attachment_key: str) -> str | None:
+        if self.error:
+            raise self.error
+        return (self.folder / f"{attachment_key}.pdf").as_uri()
+
+    def add_paper(self, attachment_key: str) -> Path:
+        path = self.folder / f"{attachment_key}.pdf"
+        path.write_bytes(b"%PDF-1.7 paper " + attachment_key.encode())
+        return path
