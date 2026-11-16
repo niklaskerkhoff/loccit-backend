@@ -31,9 +31,11 @@ _RECT_TOLERANCE = 0.5
 class Citation:
     key: str
     dest: str
-    # One rectangle per link annotation, in PyMuPDF page coordinates
-    # (origin top left, unit pt).
+    # One rectangle per link annotation, in PDF user space (origin bottom
+    # left, unit pt), i.e. the coordinates PDF.js works with.
     rects: list[Rect]
+    # The same annotations as PDF.js names them ("<object number>R").
+    annotation_ids: list[str]
 
 
 @dataclass
@@ -86,7 +88,8 @@ def scan_citations(pdf_path: Path) -> CitationScan:
 class _Link:
     key: str
     dest: str
-    rect: Rect
+    pdf_rect: Rect
+    annotation_id: str
     # Range of the characters under the link in the page's text sequence.
     start: int
     end: int
@@ -95,7 +98,7 @@ class _Link:
 
 
 def _scan_page(doc: pymupdf.Document, page: pymupdf.Page, scan: CitationScan) -> None:
-    links: list[tuple[str, str, Rect]] = []
+    links: list[tuple[str, str, dict]] = []
     for link in page.get_links():
         scan.link_count += 1
         dest = _named_dest(doc, link)
@@ -103,13 +106,13 @@ def _scan_page(doc: pymupdf.Document, page: pymupdf.Page, scan: CitationScan) ->
             continue
         scan.dest_prefixes[dest.split(".", 1)[0]] += 1
         if key := parse_cite_dest(dest):
-            links.append((key, dest, tuple(link["from"])))
+            links.append((key, dest, link))
     if not links:
         return
 
     chars = _page_chars(page)
     located = sorted(
-        (_locate(key, dest, rect, chars) for key, dest, rect in links),
+        (_locate(key, dest, link, page, chars) for key, dest, link in links),
         key=lambda link: link.start,
     )
     text = "".join(char for char, _, _ in chars)
@@ -120,16 +123,16 @@ def _scan_page(doc: pymupdf.Document, page: pymupdf.Page, scan: CitationScan) ->
         adjacent = previous is not None and previous.placed and link.placed
         gap = text[previous.end + 1 : link.start] if adjacent else ""
         if adjacent and _SEPARATORS.fullmatch(gap):
-            if link.key == previous.key:
-                group.citations[-1].rects.append(link.rect)
-            else:
-                group.citations.append(Citation(link.key, link.dest, [link.rect]))
+            if link.key != previous.key:
+                group.citations.append(Citation(link.key, link.dest, [], []))
         else:
             if adjacent and _RANGE_DASH.fullmatch(gap):
                 scan.suspected_ranges += 1
             group = CitationGroup(len(scan.groups), page.number, [])
-            group.citations.append(Citation(link.key, link.dest, [link.rect]))
+            group.citations.append(Citation(link.key, link.dest, [], []))
             scan.groups.append(group)
+        group.citations[-1].rects.append(link.pdf_rect)
+        group.citations[-1].annotation_ids.append(link.annotation_id)
         previous = link
 
 
@@ -163,11 +166,16 @@ def _page_chars(page: pymupdf.Page) -> list[tuple[str, float, float]]:
     return chars
 
 
-def _locate(key: str, dest: str, rect: Rect, chars: list[tuple[str, float, float]]) -> _Link:
-    x0, y0, x1, y1 = rect
-    x0, y0 = x0 - _RECT_TOLERANCE, y0 - _RECT_TOLERANCE
-    x1, y1 = x1 + _RECT_TOLERANCE, y1 + _RECT_TOLERANCE
+def _locate(
+    key: str, dest: str, link: dict, page: pymupdf.Page, chars: list[tuple[str, float, float]]
+) -> _Link:
+    # Link rectangles follow the page rotation, extracted text does not.
+    rect = pymupdf.Rect(link["from"]) * page.derotation_matrix
+    pdf_rect = tuple(round(v, 2) for v in (rect * ~page.transformation_matrix).normalize())
+    annotation_id = f"{link['xref']}R"
+    x0, y0 = rect.x0 - _RECT_TOLERANCE, rect.y0 - _RECT_TOLERANCE
+    x1, y1 = rect.x1 + _RECT_TOLERANCE, rect.y1 + _RECT_TOLERANCE
     covered = [i for i, (_, x, y) in enumerate(chars) if x0 <= x <= x1 and y0 <= y <= y1]
     if not covered:
-        return _Link(key, dest, rect, len(chars), len(chars), placed=False)
-    return _Link(key, dest, rect, covered[0], covered[-1], placed=True)
+        return _Link(key, dest, pdf_rect, annotation_id, len(chars), len(chars), placed=False)
+    return _Link(key, dest, pdf_rect, annotation_id, covered[0], covered[-1], placed=True)

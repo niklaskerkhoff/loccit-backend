@@ -1,3 +1,4 @@
+import pymupdf
 import pytest
 
 from loccit.citations import parse_cite_dest, scan_citations
@@ -138,3 +139,29 @@ def test_pdf_without_citation_links(tmp_path):
     assert result.groups == []
     assert result.keys == []
     assert result.dest_prefixes == {"section": 1}
+
+
+def test_rects_are_in_pdf_space_and_carry_the_annotation_ids(tmp_path):
+    path = make_pdf(tmp_path / "thesis.pdf", [[["See [", ("1", "cite.a"), "]."]]])
+    citation = scan_citations(path).groups[0].citations[0]
+    with pymupdf.open(path) as doc:
+        link = doc[0].get_links()[0]
+        raw_rect = doc.xref_get_key(link["xref"], "Rect")[1]
+    assert citation.annotation_ids == [f"{link['xref']}R"]
+    expected = [float(value) for value in raw_rect.strip("[]").split()]
+    assert citation.rects == [pytest.approx(expected, abs=0.01)]
+    # Origin bottom left: the first line of the page lies near its top.
+    assert citation.rects[0][1] > 700
+
+
+def test_rotated_page(tmp_path):
+    path = make_pdf(
+        tmp_path / "upright.pdf", [[["See [", ("1", "cite.a"), ", ", ("2", "cite.b"), "]."]]]
+    )
+    upright = scan_citations(path)
+    with pymupdf.open(path) as doc:
+        doc[0].set_rotation(90)
+        doc.save(tmp_path / "rotated.pdf")
+    rotated = scan_citations(tmp_path / "rotated.pdf")
+    assert [group.keys for group in rotated.groups] == [["a", "b"]]
+    assert rotated.groups[0].citations[0].rects == upright.groups[0].citations[0].rects
