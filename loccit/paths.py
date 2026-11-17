@@ -15,6 +15,10 @@ def settings_file(root: Path | None = None) -> Path:
     return (root or data_dir()) / "settings.toml"
 
 
+def models_file(root: Path | None = None) -> Path:
+    return (root or data_dir()) / "models.toml"
+
+
 def database_file(root: Path | None = None) -> Path:
     return (root or data_dir()) / "loccit.sqlite"
 
