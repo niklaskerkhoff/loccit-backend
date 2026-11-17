@@ -106,9 +106,7 @@ def _skip_balanced(text: str, pos: int, opening: str, closing: str) -> int:
     return pos
 
 
-def _parse_entry(
-    text: str, pos: int, entry_type: str, closing: str
-) -> tuple[BibEntry | None, int]:
+def _parse_entry(text: str, pos: int, entry_type: str, closing: str) -> tuple[BibEntry | None, int]:
     end_of_key = pos
     while end_of_key < len(text) and text[end_of_key] not in ",\n" + closing:
         end_of_key += 1

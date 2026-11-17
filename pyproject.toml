@@ -22,3 +22,10 @@ filterwarnings = [
     "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
     "ignore:Using `httpx` with `starlette.testclient`",
 ]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]

@@ -329,9 +329,7 @@ class Resolver:
         return resolution
 
 
-def _fill_metadata(
-    resolution: Resolution, item: ZoteroItem | None, entry: BibEntry | None
-) -> None:
+def _fill_metadata(resolution: Resolution, item: ZoteroItem | None, entry: BibEntry | None) -> None:
     if item:
         resolution.title = item.title
         resolution.authors = tuple(item.authors)

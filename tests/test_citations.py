@@ -28,7 +28,17 @@ def scan(tmp_path, *pages):
 def test_numeric_group(tmp_path):
     result = scan(
         tmp_path,
-        [["As shown before [", ("1", "cite.a"), ", ", ("2", "cite.b"), ", ", ("3", "cite.c"), "]."]],
+        [
+            [
+                "As shown before [",
+                ("1", "cite.a"),
+                ", ",
+                ("2", "cite.b"),
+                ", ",
+                ("3", "cite.c"),
+                "].",
+            ]
+        ],
     )
     assert [group.keys for group in result.groups] == [["a", "b", "c"]]
     assert result.groups[0].page == 0
@@ -38,7 +48,17 @@ def test_numeric_group(tmp_path):
 def test_citations_with_text_between_are_separate_groups(tmp_path):
     result = scan(
         tmp_path,
-        [["First [", ("1", "cite.a"), "] and then [", ("2", "cite.b"), "]. [", ("3", "cite.c"), "]"]],
+        [
+            [
+                "First [",
+                ("1", "cite.a"),
+                "] and then [",
+                ("2", "cite.b"),
+                "]. [",
+                ("3", "cite.c"),
+                "]",
+            ]
+        ],
     )
     assert [group.keys for group in result.groups] == [["a"], ["b"], ["c"]]
     assert [group.id for group in result.groups] == [0, 1, 2]

@@ -159,7 +159,9 @@ def test_library_is_cached_until_reload(workspace, zotero, thesis_pdf):
         raw_pdf("PDF00009", "ITEM0009"),
     ]
     zotero.add_paper("PDF00009")
-    assert workspace.citations(document.id).resolutions["nobody_nothing_1999"].status == res.NO_ENTRY
+    assert (
+        workspace.citations(document.id).resolutions["nobody_nothing_1999"].status == res.NO_ENTRY
+    )
     reloaded = workspace.citations(document.id, reload=True)
     assert zotero.library_loads == 2
     assert reloaded.resolutions["nobody_nothing_1999"].status == res.OK
