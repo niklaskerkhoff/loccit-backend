@@ -95,17 +95,6 @@ def test_broken_file_is_reported_with_its_path(tmp_path):
         load_model_settings(file)
 
 
-@pytest.fixture
-def keychain(monkeypatch):
-    stored: dict[tuple[str, str], str] = {}
-    monkeypatch.setattr(models.keyring, "get_password", lambda s, u: stored.get((s, u)))
-    monkeypatch.setattr(
-        models.keyring, "set_password", lambda s, u, key: stored.update({(s, u): key})
-    )
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    return stored
-
-
 def test_api_key_comes_from_the_environment_first_then_the_keychain(keychain, monkeypatch):
     assert models.get_api_key() is None
     models.set_api_key("sk-from-keychain")
@@ -120,3 +109,11 @@ def test_a_failing_keychain_means_no_key(keychain, monkeypatch):
 
     monkeypatch.setattr(models.keyring, "get_password", fail)
     assert models.get_api_key() is None
+
+
+def test_tests_never_reach_the_real_keychain(keychain):
+    """Guards the fixture in conftest.py: the keychain is the in-memory one."""
+    assert type(models.keyring.get_keyring()).__name__ == "InMemoryKeyring"
+    assert models.get_api_key() is None
+    models.set_api_key("sk-test")
+    assert keychain == {("loccit", "anthropic-api-key"): "sk-test"}

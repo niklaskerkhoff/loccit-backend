@@ -132,24 +132,6 @@ def test_missing_input_file(zotero, tmp_path, capsys):
 # --- API key and model check -------------------------------------------------
 
 
-@pytest.fixture
-def keychain(monkeypatch):
-    stored: dict[tuple[str, str], str] = {}
-
-    def delete(service, user):
-        if (service, user) not in stored:
-            raise cli.models.keyring.errors.PasswordDeleteError()
-        del stored[(service, user)]
-
-    monkeypatch.setattr(cli.models.keyring, "get_password", lambda s, u: stored.get((s, u)))
-    monkeypatch.setattr(
-        cli.models.keyring, "set_password", lambda s, u, k: stored.update({(s, u): k})
-    )
-    monkeypatch.setattr(cli.models.keyring, "delete_password", delete)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    return stored
-
-
 def test_set_key_stores_the_key_in_the_keychain_without_echoing_it(keychain, monkeypatch, capsys):
     monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "  sk-ant-secret  ")
     assert cli.main(["set-key"]) == 0
