@@ -4,7 +4,7 @@ loccit checks the citations of a LaTeX thesis against the cited papers: click
 a citation in the thesis PDF and see the cited paper next to it, with the
 supporting passages highlighted. The papers come from the local Zotero library.
 
-Status: milestone M0 (mapping citations to Zotero PDFs, command line only).
+Status: milestone M1 (two viewers, no AI yet).
 
 ## Setup
 
@@ -15,7 +15,30 @@ pip install -e .
 pytest
 ```
 
-## Check the mapping
+## Start
+
+```sh
+python -m loccit                              # start the server, open the browser
+python -m loccit thesis.pdf --bib refs.bib    # same, and open this thesis right away
+```
+
+The backend serves the HTTP API on `http://127.0.0.1:8765` (`--port` to
+change) and, if it knows where the built
+[web frontend](../loccit-web-frontend) is, the frontend as well:
+
+```sh
+# once, after `npm run build` in loccit-web-frontend
+python -m loccit --frontend /path/to/loccit-web-frontend/dist
+```
+
+The folder is remembered in `~/.loccit/settings.toml`. Without it the backend
+only serves the API and prints how to start the frontend's dev server.
+
+Zotero must be running with *Settings → Advanced → Allow other applications
+on this computer to communicate with Zotero* enabled. Only GET requests are
+sent to Zotero.
+
+## Check the mapping on the command line
 
 ```sh
 python -m loccit resolve thesis.pdf --bib refs.bib
@@ -23,9 +46,27 @@ python -m loccit resolve thesis.pdf --bib refs.bib
 
 Prints, for every cite key in the thesis PDF, what way A and way B found,
 whether they agree, and the PDF path reported by Zotero or the reason why
-there is none. Zotero must be running with *Settings → Advanced → Allow other
-applications on this computer to communicate with Zotero* enabled. Only GET
-requests are sent to Zotero.
+there is none.
+
+## HTTP API
+
+Documented by its OpenAPI schema: `/api/openapi.json`, browsable at
+`/api/docs` while the server runs.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/documents` | stored theses, most recently opened first |
+| `POST /api/documents` | upload a thesis PDF and optionally its `.bib` |
+| `DELETE /api/documents/{id}` | remove a thesis from loccit |
+| `GET /api/documents/{id}/pdf` | the thesis PDF |
+| `GET /api/documents/{id}/citations` | citation groups and what each cite key resolves to; `?reload=true` reads Zotero again |
+| `GET /api/papers/{attachment_key}/pdf` | a paper's PDF |
+| `PUT /api/choices/items/{cite_key}` | remember which version of a publication a key stands for |
+| `PUT /api/choices/pdfs/{item_key}` | remember which of an item's PDFs to show |
+
+The server listens on 127.0.0.1 only, refuses requests for other host names,
+and serves a paper only if it resolved a citation to that attachment itself;
+there is no way to request a file by path.
 
 ## How a citation is mapped to a PDF
 
@@ -80,5 +121,16 @@ missing on disk.
 
 ## Data
 
-Everything loccit stores lives in `~/.loccit/`. Paper PDFs are read where
-Zotero keeps them and are never copied.
+Everything loccit stores lives in `~/.loccit/`; delete the folder to get rid
+of it.
+
+| Path | Content |
+| --- | --- |
+| `loccit.sqlite` | list of uploaded theses, choices between versions and PDFs |
+| `documents/<id>/` | `thesis.pdf` and `refs.bib` of an uploaded thesis |
+| `settings.toml` | `frontend_dist`, the folder of the built frontend |
+| `overrides.toml` | optional, written by hand: cite key to Zotero item key |
+
+Uploading a PDF with the same file name (a browser's ` (1)` download counter
+is ignored) replaces the stored version; without a new `.bib` the stored one
+is kept. Paper PDFs are read where Zotero keeps them and are never copied.

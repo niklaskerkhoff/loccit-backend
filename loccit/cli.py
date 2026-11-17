@@ -132,7 +132,7 @@ def run_server(args: argparse.Namespace) -> int:
     frontend = settings.frontend_dist
     backend_url = f"http://127.0.0.1:{args.port}/"
     if frontend and (frontend / "index.html").is_file():
-        print(f"loccit läuft auf {backend_url}{fragment} (Beenden mit Strg+C)")
+        print(f"loccit läuft auf {backend_url}{fragment} (Beenden mit Strg+C)", flush=True)
         if not args.no_browser:
             threading.Timer(0.7, webbrowser.open, [backend_url + fragment]).start()
     else:
@@ -144,7 +144,8 @@ def run_server(args: argparse.Namespace) -> int:
             "Es ist kein gebautes Frontend hinterlegt. Zwei Möglichkeiten, im Frontend-Repo:\n"
             f"  Entwicklung: `npm run dev` starten und {DEV_SERVER_URL}{fragment} öffnen\n"
             "  Dauerhaft:   `npm run build`, dann einmalig\n"
-            "               python -m loccit --frontend /pfad/zu/loccit-web-frontend/dist"
+            "               python -m loccit --frontend /pfad/zu/loccit-web-frontend/dist",
+            flush=True,
         )
     uvicorn.run(
         create_app(workspace, frontend), host="127.0.0.1", port=args.port, log_level="warning"
