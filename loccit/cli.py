@@ -1,19 +1,24 @@
 """Command line entry point.
 
 `python -m loccit [thesis.pdf --bib refs.bib]` starts the server,
-`python -m loccit resolve thesis.pdf --bib refs.bib` prints the mapping.
+`python -m loccit resolve thesis.pdf --bib refs.bib` prints the mapping,
+`python -m loccit set-key` stores the Anthropic API key in the keychain,
+`python -m loccit check-models` compares models.toml with the API.
 """
 
 import argparse
+import getpass
 import socket
 import sys
 import threading
 import webbrowser
 from pathlib import Path
 
+import anthropic
 import uvicorn
 
-from loccit import paths, resolve as res
+from loccit import models, paths
+from loccit import resolve as res
 from loccit.api import create_app
 from loccit.bibfile import load_bib
 from loccit.citations import CitationScan, scan_citations
@@ -69,11 +74,25 @@ def main(argv: list[str] | None = None) -> int:
         parser.add_argument("--bib", type=Path, help=".bib file of the thesis")
         args = parser.parse_args(argv[1:])
         return run_resolve(args.pdf, args.bib)
+    if argv[:1] == ["set-key"]:
+        parser = argparse.ArgumentParser(
+            prog="python -m loccit set-key",
+            description="Store the Anthropic API key in the system keychain.",
+        )
+        parser.add_argument("--delete", action="store_true", help="remove the stored key")
+        return run_set_key(parser.parse_args(argv[1:]).delete)
+    if argv[:1] == ["check-models"]:
+        parser = argparse.ArgumentParser(
+            prog="python -m loccit check-models",
+            description="Compare ~/.loccit/models.toml with what the API reports.",
+        )
+        parser.parse_args(argv[1:])
+        return run_check_models()
 
     parser = argparse.ArgumentParser(
         prog="python -m loccit",
         description="Start loccit and open it in the browser.",
-        epilog="Other command: python -m loccit resolve thesis.pdf [--bib refs.bib]",
+        epilog="Other commands: resolve thesis.pdf [--bib refs.bib], set-key, check-models",
     )
     parser.add_argument("pdf", nargs="?", type=Path, help="PDF of the thesis to open")
     parser.add_argument("--bib", type=Path, help=".bib file of the thesis")
@@ -106,6 +125,12 @@ def run_server(args: argparse.Namespace) -> int:
         settings.frontend_dist = dist
         save_settings(paths.settings_file(root), settings)
 
+    try:
+        # Writes models.toml with the defaults on the first start.
+        models.load_model_settings(paths.models_file(root))
+    except models.ModelSettingsError as error:
+        print(f"models.toml ist fehlerhaft: {error}", file=sys.stderr)
+        return 2
     workspace = Workspace(root)
     fragment = ""
     if args.pdf:
@@ -151,6 +176,79 @@ def run_server(args: argparse.Namespace) -> int:
         create_app(workspace, frontend), host="127.0.0.1", port=args.port, log_level="warning"
     )
     return 0
+
+
+def run_set_key(delete: bool) -> int:
+    if delete:
+        removed = models.delete_api_key()
+        print(
+            "API-Key aus dem Schlüsselbund entfernt." if removed else "Es war kein Key gespeichert."
+        )
+        return 0
+    # getpass keeps the key out of the terminal scrollback and shell history.
+    key = getpass.getpass("Anthropic API-Key (Eingabe bleibt unsichtbar): ").strip()
+    if not key:
+        print("Kein Key eingegeben, nichts gespeichert.", file=sys.stderr)
+        return 2
+    models.set_api_key(key)
+    print("API-Key im System-Schlüsselbund gespeichert (Dienst „loccit“).")
+    return 0
+
+
+def run_check_models(client: anthropic.Anthropic | None = None) -> int:
+    """Ask the Models API what each configured model accepts and report
+    where models.toml offers something else."""
+    try:
+        settings = models.load_model_settings(paths.models_file())
+    except models.ModelSettingsError as error:
+        print(f"models.toml ist fehlerhaft: {error}", file=sys.stderr)
+        return 2
+    if client is None:
+        key = models.get_api_key()
+        if not key:
+            print(
+                "Kein API-Key: ANTHROPIC_API_KEY setzen oder `python -m loccit set-key`.",
+                file=sys.stderr,
+            )
+            return 2
+        client = anthropic.Anthropic(api_key=key)
+
+    problems = 0
+    for model in settings.models:
+        try:
+            info = client.models.retrieve(model.id)
+        except anthropic.NotFoundError:
+            print(f"✗ {model.id}: Die API kennt dieses Modell nicht.")
+            problems += 1
+            continue
+        except anthropic.APIError as error:
+            print(f"Abfrage fehlgeschlagen: {error}", file=sys.stderr)
+            return 2
+        capabilities = info.capabilities.model_dump() if info.capabilities else {}
+        notes = []
+        if not _supported(capabilities, ("citations",)):
+            notes.append("Citations werden laut API nicht unterstützt")
+        for level in model.levels:
+            if level == models.OFF:
+                path = ("thinking", "types", model.thinking_off)
+            else:
+                path = ("effort", level)
+            if not _supported(capabilities, path):
+                notes.append(f"Stufe „{level}“ wird laut API nicht unterstützt")
+        if models.OFF not in model.levels:
+            for off in ("disabled", "between_tools"):
+                if _supported(capabilities, ("thinking", "types", off)):
+                    notes.append(f'„off“ wäre möglich (thinking_off = "{off}")')
+        problems += len(notes)
+        print(f"{'✗' if notes else '✓'} {model.id}: {'; '.join(notes) or 'passt zur API'}")
+    return 1 if problems else 0
+
+
+def _supported(capabilities: dict, path: tuple[str, ...]) -> bool:
+    node = capabilities
+    for name in path:
+        node = (node or {}).get(name) if isinstance(node, dict) else None
+    return bool(isinstance(node, dict) and node.get("supported"))
 
 
 def _port_in_use(port: int) -> bool:
@@ -299,7 +397,9 @@ def _way_summaries(resolutions: list[res.Resolution], has_bib: bool) -> list[str
     agree = sum(r.ways_agree is True for r in b_matched)
     differ = [r for r in b_matched if r.ways_agree is False]
     unchecked = [r for r in b_matched if r.ways_agree is None]
-    out.append(f"  Von den {len(b_matched)} zugeordneten bestätigt Weg A denselben Eintrag: {agree}")
+    out.append(
+        f"  Von den {len(b_matched)} zugeordneten bestätigt Weg A denselben Eintrag: {agree}"
+    )
     out.append(f"  Weg A findet einen anderen Eintrag: {len(differ)}")
     out += [f"    {r.cite_key}: A {_way(r.way_a)}, B {_way(r.way_b)}" for r in differ]
     out.append(f"  Weg A findet nichts Eindeutiges (nur Weg B): {len(unchecked)}")
@@ -400,7 +500,7 @@ def _table(header: list[str], rows: list[list[str]]) -> str:
     widths = [max(len(row[i]) for row in [header, *rows]) for i in range(len(header) - 1)]
     lines = []
     for row in [header, *rows]:
-        cells = [cell.ljust(width) for cell, width in zip(row, widths)]
+        cells = [cell.ljust(width) for cell, width in zip(row, widths, strict=False)]
         lines.append("  ".join([*cells, row[-1]]).rstrip())
     lines.insert(1, "  ".join("-" * width for width in [*widths, len(header[-1])]))
     return "\n".join(lines)

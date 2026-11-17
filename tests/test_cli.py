@@ -50,7 +50,13 @@ def thesis(tmp_path):
         tmp_path / "thesis.pdf",
         [
             [
-                ["Claim [", ("1", "cite.heltweg_study_2025"), ", ", ("2", "cite.brown_no_2020"), "]."],
+                [
+                    "Claim [",
+                    ("1", "cite.heltweg_study_2025"),
+                    ", ",
+                    ("2", "cite.brown_no_2020"),
+                    "].",
+                ],
                 ["Another [", ("3", "cite.missing_key_2019"), "]."],
             ]
         ],
@@ -121,3 +127,114 @@ def test_zotero_problems_are_explained(zotero, thesis, capsys, error, message):
 def test_missing_input_file(zotero, tmp_path, capsys):
     assert cli.main(["resolve", str(tmp_path / "nope.pdf")]) == 2
     assert "Datei nicht gefunden" in capsys.readouterr().err
+
+
+# --- API key and model check -------------------------------------------------
+
+
+@pytest.fixture
+def keychain(monkeypatch):
+    stored: dict[tuple[str, str], str] = {}
+
+    def delete(service, user):
+        if (service, user) not in stored:
+            raise cli.models.keyring.errors.PasswordDeleteError()
+        del stored[(service, user)]
+
+    monkeypatch.setattr(cli.models.keyring, "get_password", lambda s, u: stored.get((s, u)))
+    monkeypatch.setattr(
+        cli.models.keyring, "set_password", lambda s, u, k: stored.update({(s, u): k})
+    )
+    monkeypatch.setattr(cli.models.keyring, "delete_password", delete)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    return stored
+
+
+def test_set_key_stores_the_key_in_the_keychain_without_echoing_it(keychain, monkeypatch, capsys):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "  sk-ant-secret  ")
+    assert cli.main(["set-key"]) == 0
+    assert cli.models.get_api_key() == "sk-ant-secret"
+    output = capsys.readouterr()
+    assert "sk-ant-secret" not in output.out + output.err
+    assert cli.main(["set-key", "--delete"]) == 0
+    assert cli.models.get_api_key() is None
+    assert cli.main(["set-key", "--delete"]) == 0
+
+
+def test_set_key_ignores_empty_input(keychain, monkeypatch):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "   ")
+    assert cli.main(["set-key"]) == 2
+    assert keychain == {}
+
+
+class FakeModelsApi:
+    """Answers `client.models.retrieve` like the Models API."""
+
+    def __init__(self, off: dict[str, str | None]):
+        self.off = off
+        self.models = self
+
+    def retrieve(self, model_id: str):
+        from anthropic.types import ModelInfo
+
+        def support(value: bool) -> dict:
+            return {"supported": value}
+
+        types = {
+            name: support(self.off[model_id] == name) for name in ("disabled", "between_tools")
+        }
+        types |= {"adaptive": support(True), "enabled": support(False)}
+        effort = {level: support(True) for level in ("low", "medium", "high", "xhigh", "max")}
+        capabilities = {
+            name: support(True)
+            for name in (
+                "batch",
+                "citations",
+                "code_execution",
+                "image_input",
+                "pdf_input",
+                "structured_outputs",
+            )
+        }
+        capabilities["effort"] = {"supported": True, **effort}
+        capabilities["thinking"] = {"supported": True, "types": types}
+        return ModelInfo.model_construct(id=model_id, capabilities=_Capabilities(capabilities))
+
+
+class _Capabilities:
+    def __init__(self, tree: dict):
+        self.tree = tree
+
+    def model_dump(self) -> dict:
+        return self.tree
+
+
+def test_check_models_confirms_the_defaults(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.paths, "models_file", lambda: tmp_path / "models.toml")
+    api = FakeModelsApi(
+        {
+            "claude-sonnet-5-5": "between_tools",
+            "claude-opus-5-5": None,
+            "claude-haiku-5-5": "disabled",
+            "claude-fable-5-2": None,
+        }
+    )
+    assert cli.run_check_models(api) == 0
+    assert capsys.readouterr().out.count("passt zur API") == 4
+
+
+def test_check_models_reports_what_the_api_sees_differently(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.paths, "models_file", lambda: tmp_path / "models.toml")
+    api = FakeModelsApi(
+        {
+            "claude-sonnet-5-5": "disabled",
+            "claude-opus-5-5": "between_tools",
+            "claude-haiku-5-5": "disabled",
+            "claude-fable-5-2": None,
+        }
+    )
+    assert cli.run_check_models(api) == 1
+    out = capsys.readouterr().out
+    assert "✗ claude-sonnet-5-5: Stufe „off“ wird laut API nicht unterstützt" in out
+    assert '✗ claude-opus-5-5: „off“ wäre möglich (thinking_off = "between_tools")' in out
+    assert "✓ claude-haiku-5-5" in out
