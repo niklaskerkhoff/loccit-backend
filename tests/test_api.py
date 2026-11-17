@@ -185,6 +185,17 @@ def test_requests_for_another_host_are_refused(client):
     assert response.status_code == 400
 
 
+def test_requests_from_pages_of_other_sites_are_refused(client, thesis_pdf):
+    foreign = {"origin": "https://evil.example"}
+    files = {"pdf": ("thesis.pdf", thesis_pdf, "application/pdf")}
+    assert client.post("/api/documents", files=files, headers=foreign).status_code == 403
+    assert client.get("/api/documents", headers=foreign).status_code == 403
+    assert client.get("/api/documents").json() == []
+    # The frontend itself, also behind the dev server's proxy.
+    for origin in ("http://127.0.0.1:8765", "http://localhost:5173"):
+        assert client.get("/api/documents", headers={"origin": origin}).status_code == 200
+
+
 def test_openapi_schema_describes_the_api(client):
     schema = client.get("/api/openapi.json").json()
     assert set(schema["paths"]) == {

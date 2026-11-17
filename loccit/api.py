@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -199,6 +200,9 @@ class PdfChoice(BaseModel):
     attachment_key: str | None = Field(description="Attachment key; null forgets the choice.")
 
 
+LOCAL_HOSTS = ("127.0.0.1", "localhost")
+
+
 def create_app(workspace: Workspace, frontend_dist: Path | None = None) -> FastAPI:
     app = FastAPI(
         title="loccit",
@@ -206,8 +210,17 @@ def create_app(workspace: Workspace, frontend_dist: Path | None = None) -> FastA
         redoc_url=None,
         openapi_url="/api/openapi.json",
     )
-    # Only pages served from this machine may talk to the API.
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+    # Only pages served from this machine may talk to the API: requests for
+    # another host name are refused, and so are requests a page of another
+    # site makes from the browser (they could upload files or start checks).
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(LOCAL_HOSTS))
+
+    @app.middleware("http")
+    async def refuse_foreign_origins(request: Request, call_next):
+        origin = request.headers.get("origin")
+        if origin and urlparse(origin).hostname not in LOCAL_HOSTS:
+            return JSONResponse({"detail": "foreign origin"}, status_code=403)
+        return await call_next(request)
 
     @app.exception_handler(DocumentNotFound)
     def unknown_document(request: Request, error: DocumentNotFound) -> JSONResponse:
