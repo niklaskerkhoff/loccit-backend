@@ -110,6 +110,9 @@ class Workspace:
         self._paper_files: dict[tuple[str, int, int], tuple[str, list]] = {}
         # (document id, PDF hash, group id) -> checked paragraph
         self._contexts: dict[tuple[int, str, int], Context | None] = {}
+        # (task hash, model, thinking level) -> lock held while that check runs
+        self._run_locks: dict[tuple[str, str, str], threading.Lock] = {}
+        self._run_locks_guard = threading.Lock()
         self._lock = threading.Lock()
         self._library: LibraryIndex | None = None
         # attachment key -> `file://` URL as reported by Zotero
@@ -262,15 +265,15 @@ class Workspace:
         task_papers = [
             TaskPaper(p.paper.cite_key, p.sha256, SENTENCE_VERSION) for p in check.papers
         ]
+        key = task_hash(check.context.hash, group.keys, task_papers)
         if run:
             try:
-                check.run = self._run_check(check, group.keys, task_papers, model, thinking)
+                check.run = self._run_once(check, group.keys, task_papers, model, thinking)
             except StrategyError as error:
                 check.error, check.error_detail = error.code, error.detail
                 return check
         else:
-            task = self.store.find_task(task_hash(check.context.hash, group.keys, task_papers))
-            check.run = self.store.latest_run(task.id, model, thinking) if task else None
+            check.run = self._latest_run(key, model, thinking)
 
         if check.run:
             by_key = {p.paper.cite_key: p for p in check.papers}
@@ -282,6 +285,31 @@ class Workspace:
                 if found:
                     check.passages.append((found, paper.attachment_key))
         return check
+
+    def _latest_run(self, key: str, model: str, thinking: str) -> Run | None:
+        task = self.store.find_task(key)
+        return self.store.latest_run(task.id, model, thinking) if task else None
+
+    def _run_once(
+        self,
+        check: Check,
+        cite_keys: list[str],
+        task_papers: list[TaskPaper],
+        model: str,
+        thinking: str,
+    ) -> Run:
+        """Run the check, unless the same check is already running (say,
+        from a second browser tab): then wait for it and return its run
+        instead of paying for another one."""
+        key = task_hash(check.context.hash, cite_keys, task_papers)
+        before = self._latest_run(key, model, thinking)
+        with self._run_locks_guard:
+            lock = self._run_locks.setdefault((key, model, thinking), threading.Lock())
+        with lock:
+            latest = self._latest_run(key, model, thinking)
+            if latest and (before is None or latest.id != before.id):
+                return latest
+            return self._run_check(check, cite_keys, task_papers, model, thinking)
 
     def _run_check(
         self,

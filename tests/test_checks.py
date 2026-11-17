@@ -1,5 +1,8 @@
 """Checking a citation group end to end, with the model replaced by a fake."""
 
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -329,3 +332,45 @@ def test_check_endpoint_errors(client, document):
         ).status_code
         == 404
     )
+
+
+def test_a_check_that_is_already_running_is_joined_not_repeated(tmp_path, zotero):
+    """Two tabs press "Neu prüfen" for the same citation at the same time."""
+    started, release = threading.Event(), threading.Event()
+
+    class SlowStrategy(FakeStrategy):
+        def find_passages(self, *args, **kwargs):
+            started.set()
+            assert release.wait(5)
+            return super().find_passages(*args, **kwargs)
+
+    strategy = SlowStrategy()
+    workspace = Workspace(tmp_path / "home", zotero, strategy_factory=lambda: strategy)
+    document = workspace.import_document("thesis.pdf", thesis(tmp_path))
+    results = {}
+
+    def press(name: str, model: str = SONNET) -> None:
+        results[name] = workspace.check(document.id, 0, model, "off", run=True).run
+
+    first = threading.Thread(target=press, args=("first",))
+    first.start()
+    assert started.wait(5)
+    second = threading.Thread(target=press, args=("second",))
+    second.start()
+    other_model = threading.Thread(target=press, args=("haiku", "claude-haiku-5-5"))
+    other_model.start()
+    time.sleep(0.2)
+    release.set()
+    for thread in (first, second, other_model):
+        thread.join(5)
+
+    assert results["second"] == results["first"]
+    # Another model is another check and runs on its own.
+    assert results["haiku"].model == "claude-haiku-5-5"
+    assert len(strategy.calls) == 2
+    assert len(workspace.store.runs(results["first"].task_id)) == 2
+
+    # Pressing again later is a deliberate new check.
+    again = workspace.check(document.id, 0, SONNET, "off", run=True).run
+    assert again.id != results["first"].id
+    assert len(strategy.calls) == 3
