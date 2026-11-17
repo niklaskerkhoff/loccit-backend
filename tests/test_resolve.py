@@ -520,7 +520,7 @@ def test_reason_1_no_item_matches(resolver):
     assert result.item_key is None
     # What is known comes from the .bib, so the PDF can be added to Zotero.
     assert (result.title, result.year) == ("Not in Zotero", "2025")
-    assert result.authors == ("Heltweg, Philip", "Riehle, Dirk")
+    assert result.authors == ("Heltweg", "Riehle")
 
 
 def test_reason_2_item_without_pdf(resolver):
@@ -561,9 +561,7 @@ def test_reason_3_file_is_not_on_disk(resolver):
 
 def several_pdfs():
     return [
-        raw_item(
-            "ITEM0001", "A Study", cite_key="heltweg_study_2025", main_attachment="PDFMAIN1"
-        ),
+        raw_item("ITEM0001", "A Study", cite_key="heltweg_study_2025", main_attachment="PDFMAIN1"),
         raw_pdf("PDFFIRST", "ITEM0001", date_added="2024-08-12T00:00:08Z"),
         raw_pdf("PDFMAIN1", "ITEM0001", date_added="2025-05-01T10:00:00Z"),
         raw_pdf("PDFLAST1", "ITEM0001", date_added="2026-01-01T10:00:00Z"),

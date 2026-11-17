@@ -1,3 +1,11 @@
 pymupdf~=2.1
 httpx~=0.28
+fastapi~=0.163
+uvicorn~=0.54
+python-multipart~=0.0.34
+anthropic~=2.9
+keyring~=25.7
+
+# development
 pytest~=9.2
+ruff~=0.17

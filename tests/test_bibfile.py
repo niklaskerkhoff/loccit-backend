@@ -34,6 +34,7 @@ def test_reads_zotero_export():
     assert entry.year == "2015"
     assert entry.fields["month"] == "dec"
     assert entry.authors == ["Koshima, Amanuel Alemayehu", "Englebert, Vincent"]
+    assert entry.last_names == ["Koshima", "Englebert"]
     assert bib.duplicate_keys == set()
 
 
@@ -41,7 +42,7 @@ def test_quoted_values_concatenation_and_parentheses():
     bib = parse_bib(
         '@string{acm = "ACM"}\n'
         '@book(knuth_art_1997, title = "The {Art} of " # "Programming", '
-        'publisher = acm, date = {1997-07-01})'
+        "publisher = acm, date = {1997-07-01})"
     )
     entry = bib.entries["knuth_art_1997"]
     assert entry.title == "The {Art} of Programming"
@@ -53,6 +54,13 @@ def test_key_defined_twice_is_reported():
     bib = parse_bib("@misc{a, title = {One}}\n@misc{a, title = {Two}}\n@misc{b, title = {B}}")
     assert bib.duplicate_keys == {"a"}
     assert set(bib.entries) == {"a", "b"}
+
+
+def test_last_names():
+    bib = parse_bib(
+        "@misc{k, author = {{Object Management Group} and Donald E. Knuth and {van} Beek, J.}}"
+    )
+    assert bib.entries["k"].last_names == ["Object Management Group", "Knuth", "van Beek"]
 
 
 def test_entry_without_fields():
