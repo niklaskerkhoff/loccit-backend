@@ -20,7 +20,7 @@ import uvicorn
 
 from loccit import models, paths
 from loccit import resolve as res
-from loccit.api import create_app
+from loccit.api import DEFAULT_PORT, DEV_SERVER_PORT, create_app
 from loccit.bibfile import load_bib
 from loccit.citations import CitationScan, scan_citations
 from loccit.settings import load_settings, save_settings
@@ -60,8 +60,7 @@ _WAY_LABELS = {
 _FIELD_LABELS = {"doi": "DOI", "url": "URL", "type": "Eintragstyp"}
 
 
-DEFAULT_PORT = 8765
-DEV_SERVER_URL = "http://localhost:5173/"
+DEV_SERVER_URL = f"http://localhost:{DEV_SERVER_PORT}/"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,7 +181,10 @@ def run_server(args: argparse.Namespace) -> int:
             flush=True,
         )
     uvicorn.run(
-        create_app(workspace, frontend), host="127.0.0.1", port=args.port, log_level="warning"
+        create_app(workspace, frontend, port=args.port),
+        host="127.0.0.1",
+        port=args.port,
+        log_level="warning",
     )
     return 0
 

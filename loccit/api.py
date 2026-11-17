@@ -201,24 +201,33 @@ class PdfChoice(BaseModel):
 
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost")
+DEFAULT_PORT = 8765
+# The Vite dev server, which forwards /api to the backend.
+DEV_SERVER_PORT = 5173
 
 
-def create_app(workspace: Workspace, frontend_dist: Path | None = None) -> FastAPI:
+def create_app(
+    workspace: Workspace, frontend_dist: Path | None = None, port: int = DEFAULT_PORT
+) -> FastAPI:
+    """The app; `port` is where it is served, which pages of that origin and
+    of the Vite dev server may call the API."""
     app = FastAPI(
         title="loccit",
         docs_url="/api/docs",
         redoc_url=None,
         openapi_url="/api/openapi.json",
     )
-    # Only pages served from this machine may talk to the API: requests for
-    # another host name are refused, and so are requests a page of another
-    # site makes from the browser (they could upload files or start checks).
+    # Only loccit's own pages may talk to the API: requests for another host
+    # name are refused, and so are requests that any other page makes from
+    # the browser, including other local servers (they could upload files or
+    # start paid checks).
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(LOCAL_HOSTS))
+    own_ports = {port, DEV_SERVER_PORT}
 
     @app.middleware("http")
     async def refuse_foreign_origins(request: Request, call_next):
         origin = request.headers.get("origin")
-        if origin and urlparse(origin).hostname not in LOCAL_HOSTS:
+        if origin and not _is_own_origin(origin, own_ports):
             return JSONResponse({"detail": "foreign origin"}, status_code=403)
         return await call_next(request)
 
@@ -427,3 +436,11 @@ def _run(run: StoredRun, passages: list) -> Run:
             for found, attachment_key in passages
         ],
     )
+
+
+def _is_own_origin(origin: str, ports: set[int]) -> bool:
+    try:
+        parsed = urlparse(origin)
+        return parsed.scheme == "http" and parsed.hostname in LOCAL_HOSTS and parsed.port in ports
+    except ValueError:
+        return False

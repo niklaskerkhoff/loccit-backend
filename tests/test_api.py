@@ -192,8 +192,28 @@ def test_requests_from_pages_of_other_sites_are_refused(client, thesis_pdf):
     assert client.get("/api/documents", headers=foreign).status_code == 403
     assert client.get("/api/documents").json() == []
     # The frontend itself, also behind the dev server's proxy.
-    for origin in ("http://127.0.0.1:8765", "http://localhost:5173"):
+    for origin in ("http://127.0.0.1:8765", "http://localhost:8765", "http://localhost:5173"):
         assert client.get("/api/documents", headers={"origin": origin}).status_code == 200
+    # Other local servers, other schemes and broken origins are not loccit.
+    for origin in (
+        "http://localhost:3000",
+        "http://127.0.0.1",
+        "https://localhost:8765",
+        "null",
+        "http://localhost:99999",
+    ):
+        assert client.get("/api/documents", headers={"origin": origin}).status_code == 403
+
+
+def test_the_allowed_origin_follows_the_port(tmp_path, zotero):
+    app = create_app(Workspace(tmp_path / "home", zotero), port=9100)
+    client = TestClient(app, base_url="http://localhost")
+    assert (
+        client.get("/api/documents", headers={"origin": "http://localhost:9100"}).status_code == 200
+    )
+    assert (
+        client.get("/api/documents", headers={"origin": "http://localhost:8765"}).status_code == 403
+    )
 
 
 def test_openapi_schema_describes_the_api(client):
