@@ -5,6 +5,8 @@ model; their rectangles are what gets highlighted. The model never has to
 reproduce text, so highlights cannot drift from what the PDF says.
 """
 
+import logging
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,11 @@ SENTENCE_VERSION = "1"
 SHORT_FRAGMENT = 30
 MAX_COLLECTED = 150
 
+log = logging.getLogger(__name__)
+# MuPDF collects its messages globally; one extraction at a time keeps them
+# with the paper they belong to.
+_mupdf_messages = threading.Lock()
+
 
 @dataclass(frozen=True)
 class Sentence:
@@ -38,10 +45,22 @@ class Sentence:
 def extract_sentences(pdf_path: Path) -> list[Sentence]:
     """All text of the PDF, in reading order, split into sentences."""
     sentences: list[Sentence] = []
-    with pymupdf.open(pdf_path) as doc:
-        for page in doc:
-            for text, rects in _page_units(page):
-                sentences.append(Sentence(len(sentences), text, page.number, tuple(rects)))
+    with _mupdf_messages:
+        pymupdf.TOOLS.reset_mupdf_warnings()
+        with pymupdf.open(pdf_path) as doc:
+            for page in doc:
+                for text, rects in _page_units(page):
+                    sentences.append(Sentence(len(sentences), text, page.number, tuple(rects)))
+        messages = pymupdf.TOOLS.mupdf_warnings()
+    if messages:
+        # Mostly damaged fonts or colour spaces that do not affect the text.
+        distinct = list(dict.fromkeys(line for line in messages.splitlines() if line.strip()))
+        log.debug(
+            "MuPDF reported %d problem(s) reading %s: %s",
+            len(distinct),
+            Path(pdf_path).name,
+            "; ".join(distinct[:5]) + (" …" if len(distinct) > 5 else ""),
+        )
     return sentences
 
 

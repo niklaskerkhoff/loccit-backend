@@ -139,3 +139,27 @@ def test_pdf_without_text_has_no_sentences(tmp_path):
     doc.new_page()
     doc.save(tmp_path / "scan.pdf")
     assert extract_sentences(tmp_path / "scan.pdf") == []
+
+
+def test_mupdf_problems_are_logged_per_paper_not_printed(tmp_path, caplog, capfd):
+    path = make_pdf(tmp_path / "damaged.pdf", [[["A sentence that is long enough to count here."]]])
+    with pymupdf.open(path) as doc:
+        # A graphics state the page does not define, as in some real papers.
+        xref = doc[0].get_contents()[0]
+        doc.update_stream(xref, doc.xref_stream(xref) + b"\n/a0 gs\n")
+        doc.save(tmp_path / "broken.pdf")
+
+    with caplog.at_level("DEBUG", logger="loccit.sentences"):
+        sentences = extract_sentences(tmp_path / "broken.pdf")
+    assert [s.text for s in sentences] == ["A sentence that is long enough to count here."]
+    (record,) = caplog.records
+    assert record.levelname == "DEBUG"
+    assert "broken.pdf" in record.getMessage()
+    assert "ExtGState" in record.getMessage()
+    out, err = capfd.readouterr()
+    assert "MuPDF" not in out + err
+
+    caplog.clear()
+    with caplog.at_level("DEBUG", logger="loccit.sentences"):
+        extract_sentences(path)
+    assert caplog.records == []

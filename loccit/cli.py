@@ -8,6 +8,7 @@
 
 import argparse
 import getpass
+import logging
 import socket
 import sys
 import threading
@@ -104,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
         help="folder of the built web frontend; remembered in ~/.loccit/settings.toml",
     )
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser tab")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="log details, e.g. which paper PDFs MuPDF found damaged",
+    )
     args = parser.parse_args(argv)
     if args.bib and not args.pdf:
         parser.error("--bib needs the PDF of the thesis")
@@ -111,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_server(args: argparse.Namespace) -> int:
+    # --debug shows loccit's own details only; libraries stay at WARNING.
+    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger("loccit").setLevel(logging.DEBUG if args.debug else logging.WARNING)
     root = paths.data_dir()
     settings = load_settings(paths.settings_file(root))
     if args.frontend:

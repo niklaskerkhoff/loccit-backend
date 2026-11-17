@@ -22,6 +22,10 @@ python -m loccit                              # start the server, open the brows
 python -m loccit thesis.pdf --bib refs.bib    # same, and open this thesis right away
 ```
 
+`--debug` also logs details, such as which paper PDFs MuPDF found damaged
+while reading their text (it reads them anyway; the messages no longer go
+straight to the terminal).
+
 The backend serves the HTTP API on `http://127.0.0.1:8765` (`--port` to
 change) and, if it knows where the built
 [web frontend](../loccit-web-frontend) is, the frontend as well:
