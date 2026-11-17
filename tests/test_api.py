@@ -41,7 +41,17 @@ def client(tmp_path, zotero):
 def thesis_pdf(tmp_path):
     path = make_pdf(
         tmp_path / "thesis.pdf",
-        [[["A [", ("1", "cite.heltweg_study_2025"), ", ", ("2", "cite.brown_language_2020"), "]."]]],
+        [
+            [
+                [
+                    "A [",
+                    ("1", "cite.heltweg_study_2025"),
+                    ", ",
+                    ("2", "cite.brown_language_2020"),
+                    "].",
+                ]
+            ]
+        ],
     )
     return path.read_bytes()
 
@@ -92,7 +102,11 @@ def test_citations(client, thesis_pdf):
 
     heltweg = body["sources"]["heltweg_study_2025"]
     assert (heltweg["status"], heltweg["chosen_by"]) == ("ok", "b")
-    assert (heltweg["title"], heltweg["authors"], heltweg["year"]) == ("A Study", ["Heltweg"], "2025")
+    assert (heltweg["title"], heltweg["authors"], heltweg["year"]) == (
+        "A Study",
+        ["Heltweg"],
+        "2025",
+    )
     assert heltweg["attachment_key"] == "PDF00001"
     assert [pdf["attachment_key"] for pdf in heltweg["pdfs"]] == ["PDF00001", "PDF00002"]
 
@@ -113,9 +127,12 @@ def test_choosing_a_version_and_a_pdf(client, thesis_pdf):
     url = f"/api/documents/{document['id']}/citations"
     client.get(url)
 
-    assert client.put(
-        "/api/choices/items/brown_language_2020", json={"item_key": "SFTVNYYH"}
-    ).status_code == 204
+    assert (
+        client.put(
+            "/api/choices/items/brown_language_2020", json={"item_key": "SFTVNYYH"}
+        ).status_code
+        == 204
+    )
     brown_source = client.get(url).json()["sources"]["brown_language_2020"]
     assert (brown_source["status"], brown_source["chosen_by"]) == ("ok", "choice")
     assert brown_source["attachment_key"] == "MWZL9XFR"
@@ -176,6 +193,8 @@ def test_openapi_schema_describes_the_api(client):
         "/api/documents/{document_id}/pdf",
         "/api/documents/{document_id}/citations",
         "/api/papers/{attachment_key}/pdf",
+        "/api/models",
+        "/api/documents/{document_id}/groups/{group_id}/check",
         "/api/choices/items/{cite_key}",
         "/api/choices/pdfs/{item_key}",
     }

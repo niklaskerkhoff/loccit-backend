@@ -4,16 +4,26 @@ import hashlib
 import re
 import shutil
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
+import anthropic
 import pymupdf
 
 from loccit import paths
+from loccit import resolve as res
 from loccit.bibfile import load_bib
 from loccit.citations import CitationScan, scan_citations
+from loccit.context import Context, citation_context
+from loccit.models import ModelSettings, get_api_key, load_model_settings
 from loccit.resolve import Resolution, Resolver, load_overrides
-from loccit.store import Document, Store
+from loccit.sentences import SENTENCE_VERSION, extract_sentences
+from loccit.store import Document, Run, Store, StoredPassage, TaskPaper, task_hash
+from loccit.strategies import Paper, Passage, Strategy, StrategyError, passage
+from loccit.strategies.claude_citations import ClaudeCitations
 from loccit.zotero import (
     LibraryIndex,
     ZoteroApiDisabled,
@@ -43,6 +53,37 @@ class InvalidPdf(Exception):
     pass
 
 
+class GroupNotFound(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class CheckPaper:
+    """A paper as it goes into a check."""
+
+    attachment_key: str
+    sha256: str
+    paper: Paper
+
+
+@dataclass
+class Check:
+    """What is known about the check of one citation group with one model
+    and thinking level: the latest run, if there is one."""
+
+    # The checked paragraph; None if the citation lies over no text.
+    context: Context | None = None
+    papers: list[CheckPaper] = field(default_factory=list)
+    # Cited keys without a readable paper; the verdict does not cover them.
+    missing: list[str] = field(default_factory=list)
+    run: Run | None = None
+    # The run's passages with their rectangles, and the PDF they lie in.
+    passages: list[tuple[Passage, str]] = field(default_factory=list)
+    # Why there is no result: a code for the UI, and detail for the user.
+    error: str | None = None
+    error_detail: str = ""
+
+
 @dataclass
 class CitationsView:
     document: Document
@@ -54,10 +95,21 @@ class CitationsView:
 
 
 class Workspace:
-    def __init__(self, root: Path, zotero: ZoteroClient | None = None):
+    def __init__(
+        self,
+        root: Path,
+        zotero: ZoteroClient | None = None,
+        strategy_factory: Callable[[], Strategy] | None = None,
+    ):
         self.root = root
         self.store = Store(paths.database_file(root))
         self.zotero = zotero or ZoteroClient()
+        self._strategy_factory = strategy_factory or self._claude_citations
+        self._models: ModelSettings | None = None
+        # (path, mtime, size) of a paper file -> its hash and sentences
+        self._paper_files: dict[tuple[str, int, int], tuple[str, list]] = {}
+        # (document id, PDF hash, group id) -> checked paragraph
+        self._contexts: dict[tuple[int, str, int], Context | None] = {}
         self._lock = threading.Lock()
         self._library: LibraryIndex | None = None
         # attachment key -> `file://` URL as reported by Zotero
@@ -128,7 +180,9 @@ class Workspace:
                 resolver = Resolver(
                     self._library,
                     self._locate_file,
-                    bib=load_bib(self._folder(document_id) / BIB_FILE) if document.has_bib else None,
+                    bib=load_bib(self._folder(document_id) / BIB_FILE)
+                    if document.has_bib
+                    else None,
                     overrides=load_overrides(paths.overrides_file(self.root)),
                     item_choices=self.store.item_choices(),
                     pdf_choices=self.store.pdf_choices(),
@@ -163,6 +217,146 @@ class Workspace:
         if attachment_key not in self._file_urls:
             self._file_urls[attachment_key] = self.zotero.attachment_file_url(attachment_key)
         return self._file_urls[attachment_key]
+
+    # --- checks -------------------------------------------------------------
+
+    @property
+    def models(self) -> ModelSettings:
+        if self._models is None:
+            self._models = load_model_settings(paths.models_file(self.root))
+        return self._models
+
+    def check(
+        self, document_id: int, group_id: int, model: str, thinking: str, *, run: bool = False
+    ) -> Check:
+        """The latest stored run for a citation group, model and thinking
+        level. With `run`, the papers are checked now and the result is
+        stored as a new run first."""
+        view = self.citations(document_id)
+        if not 0 <= group_id < len(view.scan.groups):
+            raise GroupNotFound(group_id)
+        group = view.scan.groups[group_id]
+        check = Check()
+        if view.zotero_status != ZOTERO_OK:
+            check.error = "zotero_unavailable"
+            return check
+
+        context_key = (document_id, view.document.pdf_sha256, group_id)
+        if context_key not in self._contexts:
+            self._contexts[context_key] = citation_context(self.thesis_path(document_id), group)
+        check.context = self._contexts[context_key]
+        for citation in group.citations:
+            paper = self._check_paper(view.resolutions[citation.key])
+            if paper:
+                check.papers.append(paper)
+            else:
+                check.missing.append(citation.key)
+        if check.context is None:
+            check.error = "no_context"
+            return check
+        if not check.papers:
+            # A missing paper is no verdict, and no reason to ask a model.
+            check.error = "no_papers"
+            return check
+
+        task_papers = [
+            TaskPaper(p.paper.cite_key, p.sha256, SENTENCE_VERSION) for p in check.papers
+        ]
+        if run:
+            try:
+                check.run = self._run_check(check, group.keys, task_papers, model, thinking)
+            except StrategyError as error:
+                check.error, check.error_detail = error.code, error.detail
+                return check
+        else:
+            task = self.store.find_task(task_hash(check.context.hash, group.keys, task_papers))
+            check.run = self.store.latest_run(task.id, model, thinking) if task else None
+
+        if check.run:
+            by_key = {p.paper.cite_key: p for p in check.papers}
+            for stored in check.run.passages:
+                paper = by_key[stored.cite_key]
+                found = passage(
+                    paper.paper, stored.start_sentence, stored.end_sentence, stored.reason
+                )
+                if found:
+                    check.passages.append((found, paper.attachment_key))
+        return check
+
+    def _run_check(
+        self,
+        check: Check,
+        cite_keys: list[str],
+        task_papers: list[TaskPaper],
+        model: str,
+        thinking: str,
+    ) -> Run:
+        config = self.models.get(model)
+        if config is None:
+            raise StrategyError("unknown_model", model)
+        strategy = self._strategy_factory()
+        started_at = datetime.now(UTC).isoformat(timespec="seconds")
+        started = time.perf_counter()
+        result = strategy.find_passages(
+            check.context,
+            [p.paper for p in check.papers],
+            model,
+            thinking,
+            missing=tuple(check.missing),
+        )
+        duration_ms = round((time.perf_counter() - started) * 1000)
+        task = self.store.get_or_create_task(
+            check.context.hash, check.context.text, cite_keys, task_papers, check.missing
+        )
+        return self.store.add_run(
+            task.id,
+            model=model,
+            thinking=thinking,
+            strategy=strategy.name,
+            prompt_version=strategy.prompt_version,
+            started_at=started_at,
+            duration_ms=duration_ms,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+            cache_read_tokens=result.usage.cache_read_tokens,
+            cache_write_tokens=result.usage.cache_write_tokens,
+            cost_usd=config.cost(result.usage),
+            verdict=result.verdict,
+            response_text=result.response_text,
+            passages=[
+                StoredPassage(p.cite_key, p.start_sentence, p.end_sentence, p.page, p.reason)
+                for p in result.passages
+            ],
+        )
+
+    def _check_paper(self, resolution: Resolution) -> CheckPaper | None:
+        """The paper a cite key resolves to, read into sentences; None if
+        there is no PDF or it has no text (a scan)."""
+        if resolution.status != res.OK:
+            return None
+        path = resolution.pdf.path
+        stat = path.stat()
+        file_key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if file_key not in self._paper_files:
+            sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+            self._paper_files[file_key] = (sha256, extract_sentences(path))
+        sha256, sentences = self._paper_files[file_key]
+        if not sentences:
+            return None
+        paper = Paper(
+            cite_key=resolution.cite_key,
+            title=resolution.title or resolution.cite_key,
+            authors=resolution.authors,
+            year=resolution.year,
+            sentences=sentences,
+        )
+        return CheckPaper(resolution.pdf.attachment_key, sha256, paper)
+
+    def _claude_citations(self) -> Strategy:
+        api_key = get_api_key()
+        if not api_key:
+            raise StrategyError("no_api_key")
+        return ClaudeCitations(anthropic.Anthropic(api_key=api_key), self.models)
 
 
 def document_name(filename: str) -> str:

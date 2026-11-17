@@ -9,9 +9,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from loccit import models as model_settings
 from loccit import resolve as res
+from loccit import workspace as ws
 from loccit.store import Document as StoredDocument
-from loccit.workspace import CitationsView, DocumentNotFound, InvalidPdf, Workspace
+from loccit.store import Run as StoredRun
+from loccit.workspace import (
+    CitationsView,
+    DocumentNotFound,
+    GroupNotFound,
+    InvalidPdf,
+    Workspace,
+)
 from loccit.zotero import LibraryIndex
 
 
@@ -106,6 +115,82 @@ class DocumentCitations(BaseModel):
     suspected_ranges: int
 
 
+class Model(BaseModel):
+    id: str
+    label: str
+    levels: list[str] = Field(
+        description='Thinking levels the model accepts, the default first: "off" or an effort level.'
+    )
+
+
+class Models(BaseModel):
+    default_model: str
+    models: list[Model]
+    has_api_key: bool = Field(description="Whether an Anthropic API key is configured.")
+
+
+class PageRect(BaseModel):
+    page: int = Field(description="0-based page index.")
+    rect: tuple[float, float, float, float] = Field(description="In PDF user space.")
+
+
+class Passage(BaseModel):
+    """A stretch of a paper that supports the checked text."""
+
+    cite_key: str
+    attachment_key: str = Field(description="The PDF the passage lies in.")
+    page: int = Field(description="0-based index of the page the passage starts on.")
+    start_sentence: int
+    end_sentence: int = Field(description="Exclusive.")
+    rects: list[PageRect] = Field(description="One rectangle per line of the passage.")
+    reason: str
+
+
+class Run(BaseModel):
+    """One check of a citation group by one model at one thinking level."""
+
+    id: int
+    model: str
+    thinking: str
+    strategy: str
+    prompt_version: str
+    started_at: str
+    duration_ms: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    cost_usd: float = Field(description="Estimate from the prices in models.toml.")
+    verdict: Literal["supported", "partially_supported", "not_found"]
+    passages: list[Passage] = Field(description="Strongest first, across all papers.")
+
+
+class CheckError(BaseModel):
+    code: str = Field(
+        description="no_api_key, invalid_api_key, no_papers, no_context, zotero_unavailable, "
+        "unknown_model, unsupported_thinking, rate_limited, refused, truncated, bad_response, "
+        "permission_denied, api_error or no_connection."
+    )
+    detail: str
+
+
+class Check(BaseModel):
+    context: str | None = Field(
+        description="The checked paragraph of the thesis, the citation marked with <cite_here>."
+    )
+    checked_keys: list[str] = Field(description="Cite keys whose paper is read.")
+    missing_keys: list[str] = Field(
+        description="Cite keys of the group without a readable paper; a verdict does not cover them."
+    )
+    run: Run | None = Field(description="The latest run for the model and thinking level.")
+    error: CheckError | None
+
+
+class CheckRequest(BaseModel):
+    model: str
+    thinking: str
+
+
 class ItemChoice(BaseModel):
     item_key: str | None = Field(description="Zotero item key; null forgets the choice.")
 
@@ -127,6 +212,10 @@ def create_app(workspace: Workspace, frontend_dist: Path | None = None) -> FastA
     @app.exception_handler(DocumentNotFound)
     def unknown_document(request: Request, error: DocumentNotFound) -> JSONResponse:
         return JSONResponse({"detail": "unknown document"}, status_code=404)
+
+    @app.exception_handler(GroupNotFound)
+    def unknown_group(request: Request, error: GroupNotFound) -> JSONResponse:
+        return JSONResponse({"detail": "unknown citation group"}, status_code=404)
 
     @app.exception_handler(InvalidPdf)
     def invalid_pdf(request: Request, error: InvalidPdf) -> JSONResponse:
@@ -169,6 +258,29 @@ def create_app(workspace: Workspace, frontend_dist: Path | None = None) -> FastA
         if path is None or not path.is_file():
             raise HTTPException(404, "unknown paper")
         return FileResponse(path, media_type="application/pdf")
+
+    @app.get("/api/models")
+    def list_models() -> Models:
+        """The models and thinking levels from ~/.loccit/models.toml."""
+        settings = workspace.models
+        return Models(
+            default_model=settings.default_model,
+            models=[Model(id=m.id, label=m.label, levels=list(m.levels)) for m in settings.models],
+            has_api_key=model_settings.get_api_key() is not None,
+        )
+
+    @app.get("/api/documents/{document_id}/groups/{group_id}/check")
+    def stored_check(document_id: int, group_id: int, model: str, thinking: str) -> Check:
+        """The latest stored run for a citation group, model and thinking level."""
+        return _check(workspace.check(document_id, group_id, model, thinking))
+
+    @app.post("/api/documents/{document_id}/groups/{group_id}/check")
+    def run_check(document_id: int, group_id: int, request: CheckRequest) -> Check:
+        """Check a citation group now. Waits for the model's complete answer
+        and stores it as a new run; earlier runs are kept."""
+        return _check(
+            workspace.check(document_id, group_id, request.model, request.thinking, run=True)
+        )
 
     @app.put("/api/choices/items/{cite_key}", status_code=204)
     def choose_item(cite_key: str, choice: ItemChoice) -> None:
@@ -234,9 +346,7 @@ def _source(resolution: res.Resolution, library: LibraryIndex) -> Source:
             PdfFile(attachment_key=pdf.attachment_key, filename=pdf.filename, exists=pdf.exists)
             for pdf in resolution.pdfs
         ],
-        attachment_key=(
-            resolution.pdf.attachment_key if resolution.status == res.OK else None
-        ),
+        attachment_key=(resolution.pdf.attachment_key if resolution.status == res.OK else None),
         title=resolution.title,
         authors=list(resolution.authors),
         year=resolution.year,
@@ -263,4 +373,44 @@ def _candidate(group: tuple[str, ...], library: LibraryIndex) -> Candidate:
         url=item.url,
         pdf_count=len(item.pdfs),
         duplicates=list(group),
+    )
+
+
+def _check(check: ws.Check) -> Check:
+    return Check(
+        context=check.context.text if check.context else None,
+        checked_keys=[paper.paper.cite_key for paper in check.papers],
+        missing_keys=check.missing,
+        run=_run(check.run, check.passages) if check.run else None,
+        error=CheckError(code=check.error, detail=check.error_detail) if check.error else None,
+    )
+
+
+def _run(run: StoredRun, passages: list) -> Run:
+    return Run(
+        id=run.id,
+        model=run.model,
+        thinking=run.thinking,
+        strategy=run.strategy,
+        prompt_version=run.prompt_version,
+        started_at=run.started_at,
+        duration_ms=run.duration_ms,
+        input_tokens=run.input_tokens,
+        output_tokens=run.output_tokens,
+        cache_read_tokens=run.cache_read_tokens,
+        cache_write_tokens=run.cache_write_tokens,
+        cost_usd=run.cost_usd,
+        verdict=run.verdict,
+        passages=[
+            Passage(
+                cite_key=found.cite_key,
+                attachment_key=attachment_key,
+                page=found.page,
+                start_sentence=found.start_sentence,
+                end_sentence=found.end_sentence,
+                rects=[PageRect(page=page, rect=rect) for page, rect in found.rects],
+                reason=found.reason,
+            )
+            for found, attachment_key in passages
+        ],
     )
